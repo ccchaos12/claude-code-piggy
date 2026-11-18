@@ -57,6 +57,15 @@ EVENTS_DIR = os.path.join(QUEUE_DIR, "events")
 BACKOFF_FILE = os.path.join(QUEUE_DIR, "retry-after")
 
 
+def configure(source, queue_dir):
+    """Reuse this outbox/delivery code for another event source (e.g. piggy_input.py)."""
+    global SOURCE, QUEUE_DIR, EVENTS_DIR, BACKOFF_FILE
+    SOURCE = source
+    QUEUE_DIR = queue_dir
+    EVENTS_DIR = os.path.join(queue_dir, "events")
+    BACKOFF_FILE = os.path.join(queue_dir, "retry-after")
+
+
 def game_dirs():
     if os.environ.get("PIGGY_GAME_DIR"):
         return [os.environ["PIGGY_GAME_DIR"]]

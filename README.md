@@ -54,4 +54,34 @@ python3 ~/.claude/hooks/piggy_hook.py --status
 python3 ~/.claude/hooks/piggy_hook.py --flush
 ```
 
+## 键鼠计数器（piggy_input.py，macOS）
+
+不依赖任何 AI 工具：后台每 5 秒读取系统的键盘、鼠标事件**总数**，按比例换算成工作事件，来源标记为 `input`。只读计数，看不到按了哪个键、点在哪里，不需要"输入监控"权限。
+
+| 活动 | 游戏事件 |
+|---|---|
+| 每 200 次按键 | `tool` |
+| 每 50 次点击 | `tool` |
+| 累计活跃 25 分钟（60 秒内有输入算活跃） | `turn` |
+
+每小时最多 40 个事件，游戏自己的每日上限仍然有效。可用环境变量 `PIGGY_KEYS_PER_EVENT`、`PIGGY_CLICKS_PER_EVENT`、`PIGGY_ACTIVE_MIN_PER_TURN`、`PIGGY_MAX_PER_HOUR` 调整。
+
+安装并设为登录时自动启动：
+
+```bash
+./install-input.sh
+```
+
+查看进度：
+
+```bash
+/opt/anaconda3/bin/python3 ~/Library/Application\ Support/piggy-input/app/piggy_input.py --status
+```
+
+停用并移除登录项：
+
+```bash
+./uninstall-input.sh
+```
+
 环境变量：`PIGGY_GAME_DIR`（`endpoint.json` 所在目录）、`PIGGY_USERDATA`、`CLAUDE_PIGGY_QUEUE`（队列目录）。

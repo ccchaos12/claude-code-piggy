@@ -5,7 +5,7 @@
   <key>Label</key><string>com.piggy.input</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/opt/anaconda3/bin/python3</string>
+    <string>__PYTHON__</string>
     <string>-I</string>
     <string>__HOME__/Library/Application Support/piggy-input/app/piggy_input.py</string>
   </array>

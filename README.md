@@ -75,7 +75,7 @@ python3 ~/.claude/hooks/piggy_hook.py --flush
 查看进度：
 
 ```bash
-/opt/anaconda3/bin/python3 ~/Library/Application\ Support/piggy-input/app/piggy_input.py --status
+python3 ~/Library/Application\ Support/piggy-input/app/piggy_input.py --status
 ```
 
 停用并移除登录项：

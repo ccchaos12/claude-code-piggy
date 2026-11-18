@@ -13,7 +13,6 @@ Usage:
   piggy_hook.py --flush    # deliver queued events now
   piggy_hook.py --status   # show endpoint and queue state
 """
-import fcntl
 import hashlib
 import http.client
 import json
@@ -81,7 +80,48 @@ def game_dirs():
 
 
 def log(msg):
-    sys.stderr.write(f"[claude-code-piggy] {msg}\n")
+    line = f"[{SOURCE}-piggy] {msg}\n"
+    try:
+        if sys.stderr is not None:  # pythonw.exe on Windows has no stderr
+            sys.stderr.write(line)
+            return
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        with open(os.path.join(QUEUE_DIR, "error.log"), "a", encoding="utf-8") as f:
+            f.write(line)
+    except OSError:
+        pass
+
+
+def try_lock(path):
+    """Non-blocking exclusive lock on a file (Unix flock / Windows msvcrt). Returns the file or None."""
+    f = open(path, "a+")
+    try:
+        if os.name == "nt":
+            import msvcrt
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return f
+    except OSError:
+        f.close()
+        return None
+
+
+def unlock(f):
+    try:
+        if os.name == "nt":
+            import msvcrt
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(f, fcntl.LOCK_UN)
+    finally:
+        f.close()
 
 
 # ---------- outbox ----------
@@ -198,10 +238,8 @@ def flush():
             return
     except (OSError, ValueError):
         pass
-    lock = open(os.path.join(QUEUE_DIR, "deliver.lock"), "a")
-    try:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)  # one deliverer at a time
-    except OSError:
+    lock = try_lock(os.path.join(QUEUE_DIR, "deliver.lock"))  # one deliverer at a time
+    if not lock:
         return
     try:
         endpoint = discover()
@@ -248,8 +286,7 @@ def flush():
                 continue
             return  # 401/5xx etc.: retry next time
     finally:
-        fcntl.flock(lock, fcntl.LOCK_UN)
-        lock.close()
+        unlock(lock)
 
 
 def status():
@@ -269,7 +306,8 @@ def main():
         return
     if "--flush" not in sys.argv:
         try:
-            payload = json.loads(sys.stdin.read() or "{}")
+            raw = sys.stdin.buffer.read() if sys.stdin is not None else b""
+            payload = json.loads(raw.decode("utf-8") or "{}")
         except ValueError:
             return
         event = map_hook(payload) if isinstance(payload, dict) else None

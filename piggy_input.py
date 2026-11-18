@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Keyboard/mouse activity -> dsh-piggy work events (macOS).
+"""Keyboard/mouse activity -> dsh-piggy work events (macOS and Windows).
 
-Reads the system-wide input event *counters* from CoreGraphics every few seconds.
-It never sees which keys were pressed or where you clicked, only how many events
-happened, so it needs no Input Monitoring / Accessibility permission.
+macOS: reads the system-wide input event counters; needs no permission.
+Windows: counts with low-level input hooks that only check "key down" / "button down".
+Neither version reads which key was pressed or where you clicked.
 
 Conversion (tune with env vars):
   every PIGGY_KEYS_PER_EVENT keystrokes   (default 200) -> one "tool" event
@@ -27,8 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import piggy_hook as outbox  # noqa: E402  (shared private outbox + HTTP delivery)
 
 SOURCE = "input"
-QUEUE_DIR = os.environ.get("PIGGY_INPUT_QUEUE") or os.path.join(
-    os.path.expanduser("~"), "Library", "Application Support", "piggy-input")
+QUEUE_DIR = os.environ.get("PIGGY_INPUT_QUEUE") or outbox._support_dir("piggy-input")
 STATE_FILE = os.path.join(QUEUE_DIR, "state.json")
 
 KEYS_PER_EVENT = int(os.environ.get("PIGGY_KEYS_PER_EVENT", 200))
@@ -39,23 +38,89 @@ POLL_S = 5
 IDLE_LIMIT_S = 60          # no input for this long = not active
 FLUSH_EVERY_S = 30
 
-HID = 1                    # kCGEventSourceStateHIDSystemState
-KEY_DOWN = 10              # kCGEventKeyDown
-CLICKS = (1, 3, 25)        # left / right / other mouse down
-ANY_INPUT = 0xFFFFFFFF     # kCGAnyInputEventType
+if sys.platform == "darwin":
+    # macOS keeps system-wide event counters; reading them needs no permission.
+    HID = 1                    # kCGEventSourceStateHIDSystemState
+    KEY_DOWN = 10              # kCGEventKeyDown
+    CLICKS = (1, 3, 25)        # left / right / other mouse down
+    ANY_INPUT = 0xFFFFFFFF     # kCGAnyInputEventType
 
-_cg = ctypes.CDLL("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
-_cg.CGEventSourceCounterForEventType.restype = ctypes.c_uint32
-_cg.CGEventSourceCounterForEventType.argtypes = [ctypes.c_int32, ctypes.c_uint32]
-_cg.CGEventSourceSecondsSinceLastEventType.restype = ctypes.c_double
-_cg.CGEventSourceSecondsSinceLastEventType.argtypes = [ctypes.c_int32, ctypes.c_uint32]
+    _cg = ctypes.CDLL("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
+    _cg.CGEventSourceCounterForEventType.restype = ctypes.c_uint32
+    _cg.CGEventSourceCounterForEventType.argtypes = [ctypes.c_int32, ctypes.c_uint32]
+    _cg.CGEventSourceSecondsSinceLastEventType.restype = ctypes.c_double
+    _cg.CGEventSourceSecondsSinceLastEventType.argtypes = [ctypes.c_int32, ctypes.c_uint32]
 
+    def start_counting():
+        pass
 
-def read_counters():
-    keys = _cg.CGEventSourceCounterForEventType(HID, KEY_DOWN)
-    clicks = sum(_cg.CGEventSourceCounterForEventType(HID, t) for t in CLICKS)
-    idle = _cg.CGEventSourceSecondsSinceLastEventType(HID, ANY_INPUT)
-    return keys, clicks, idle
+    def read_counters():
+        keys = _cg.CGEventSourceCounterForEventType(HID, KEY_DOWN)
+        clicks = sum(_cg.CGEventSourceCounterForEventType(HID, t) for t in CLICKS)
+        idle = _cg.CGEventSourceSecondsSinceLastEventType(HID, ANY_INPUT)
+        return keys, clicks, idle
+
+elif os.name == "nt":
+    # Windows has no system counter, so count with low-level input hooks. The callbacks only
+    # look at the message type (key down / button down); key codes and positions are never read.
+    import threading
+    from ctypes import wintypes
+
+    _user32 = ctypes.WinDLL("user32", use_last_error=True)
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    WH_KEYBOARD_LL, WH_MOUSE_LL = 13, 14
+    KEY_MSGS = {0x0100, 0x0104}                    # WM_KEYDOWN, WM_SYSKEYDOWN
+    CLICK_MSGS = {0x0201, 0x0204, 0x0207, 0x020B}  # L/R/M/X button down
+    LRESULT = ctypes.c_ssize_t
+    HOOKPROC = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
+    _user32.SetWindowsHookExW.argtypes = [ctypes.c_int, HOOKPROC, wintypes.HINSTANCE, wintypes.DWORD]
+    _user32.SetWindowsHookExW.restype = wintypes.HHOOK
+    _user32.CallNextHookEx.argtypes = [wintypes.HHOOK, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM]
+    _user32.CallNextHookEx.restype = LRESULT
+    _user32.GetMessageW.argtypes = [ctypes.POINTER(wintypes.MSG), wintypes.HWND, wintypes.UINT, wintypes.UINT]
+    _user32.GetMessageW.restype = wintypes.BOOL
+    _kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+    _kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+    _kernel32.GetTickCount.restype = wintypes.DWORD
+
+    class _LASTINPUTINFO(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.UINT), ("dwTime", wintypes.DWORD)]
+
+    _counts = {"keys": 0, "clicks": 0}
+
+    def _key_proc(code, wparam, lparam):
+        if code == 0 and wparam in KEY_MSGS:
+            _counts["keys"] += 1
+        return _user32.CallNextHookEx(None, code, wparam, lparam)
+
+    def _mouse_proc(code, wparam, lparam):
+        if code == 0 and wparam in CLICK_MSGS:
+            _counts["clicks"] += 1
+        return _user32.CallNextHookEx(None, code, wparam, lparam)
+
+    _procs = (HOOKPROC(_key_proc), HOOKPROC(_mouse_proc))  # keep references alive
+
+    def _hook_thread():
+        module = _kernel32.GetModuleHandleW(None)
+        hooks = [_user32.SetWindowsHookExW(WH_KEYBOARD_LL, _procs[0], module, 0),
+                 _user32.SetWindowsHookExW(WH_MOUSE_LL, _procs[1], module, 0)]
+        if not all(hooks):
+            outbox.log(f"SetWindowsHookEx failed: {ctypes.get_last_error()}")
+        msg = wintypes.MSG()
+        while _user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:  # hooks need a message loop
+            pass
+
+    def start_counting():
+        threading.Thread(target=_hook_thread, name="piggy-input-hooks", daemon=True).start()
+
+    def read_counters():
+        info = _LASTINPUTINFO(ctypes.sizeof(_LASTINPUTINFO), 0)
+        _user32.GetLastInputInfo(ctypes.byref(info))
+        idle = ((_kernel32.GetTickCount() - info.dwTime) & 0xFFFFFFFF) / 1000.0
+        return _counts["keys"], _counts["clicks"], idle
+
+else:
+    sys.exit("piggy_input.py supports macOS and Windows only")
 
 
 def delta(new, old):
@@ -122,6 +187,10 @@ def step(state, keys, clicks, idle, elapsed):
 
 def run():
     outbox.ensure_private_dir(QUEUE_DIR)
+    instance = outbox.try_lock(os.path.join(QUEUE_DIR, "running.lock"))
+    if not instance:
+        return  # another copy is already counting; don't double count
+    start_counting()
     state = load_state()
     last = time.monotonic()
     last_flush = 0.0
@@ -143,9 +212,12 @@ def run():
 def status():
     keys, clicks, idle = read_counters()
     s = load_state()
-    print(f"system counters: keys={keys} clicks={clicks} idle={idle:.0f}s")
+    if sys.platform == "darwin":
+        print(f"system counters: keys={keys} clicks={clicks} idle={idle:.0f}s")
+    else:
+        print(f"idle: {idle:.0f}s")
     print(f"progress: keys {s.get('keys', 0)}/{KEYS_PER_EVENT}, clicks {s.get('clicks', 0)}/{CLICKS_PER_EVENT}, "
-          f"active {s.get('active_s', 0) // 60}/{ACTIVE_SECS_PER_TURN // 60} min")
+          f"active {int(s.get('active_s', 0) // 60)}/{ACTIVE_SECS_PER_TURN // 60} min")
     print(f"events sent this hour: {s.get('sent_this_hour', 0)}/{MAX_PER_HOUR}, total queued: {s.get('total_sent', 0)}")
     outbox.status()
 
